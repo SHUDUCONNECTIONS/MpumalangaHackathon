@@ -1,9 +1,10 @@
-import { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import credits from './credits.json';
 import { configured, useAuth, useTable, useSetting, useOnline, supabase } from './backend.js';
 import { isSafeUrl, safeHref } from './safe.js';
 import { CRITERIA, computeResults, resultsToCsv, formatStamp } from './scoring.js';
-import { getChats, challenges, programme, days, faqs, resources } from './data.js';
+import { getChats, challenges, programme, days, faqs, resources, event } from './data.js';
+import { startWorld } from './world.js';
 
 /* ---------- helpers ---------- */
 function useStored(key, initial) {
@@ -70,6 +71,11 @@ const I = {
   group: ['M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2', 'M9 11a4 4 0 100-8 4 4 0 000 8z'],
   trophy: ['M8 21h8M12 17v4', 'M7 4h10v5a5 5 0 01-10 0z', 'M17 5h3v2a3 3 0 01-3 3M7 5H4v2a3 3 0 003 3'],
   clock: ['M12 22a10 10 0 100-20 10 10 0 000 20z', 'M12 6v6l4 2'],
+  arrowRight: ['M5 12h14', 'M13 6l6 6-6 6'],
+  arrowLeft: ['M19 12H5', 'M11 6l-6 6 6 6'],
+  stamp: ['M9.5 3h5v4.5l-1 4.5h-3l-1-4.5z', 'M4.5 13.5h15V17h-15z', 'M6 20.5h12'],
+  mail: ['M3 6h18v12H3z', 'M3 7l9 6 9-6'],
+  key: ['M14.5 9.5a4 4 0 10-1.2 2.8', 'M13.3 12.3L21 20', 'M18 17l2-2', 'M16 15l1.5-1.5'],
 };
 
 const Hero = ({ children, className = '' }) => <div className={`hero ${className}`}>{children}</div>;
@@ -84,7 +90,7 @@ const Logo = ({ small }) => (
 );
 
 /* ---------- screens ---------- */
-function Home({ go, deadline, unread }) {
+function Home({ go, deadline, unread, isOrganiser, pending }) {
   const t = useCountdown(deadline);
   const tiles = [
     ['Team Chat', 'Talk to your team', 'chat', 'chat', '#22b573'],
@@ -92,7 +98,9 @@ function Home({ go, deadline, unread }) {
     ['Challenges', 'Choose a problem', 'challenges', 'bulb', '#7c5cff'],
     ['Programme', 'Sessions & deadlines', 'programme', 'cal', '#17b8a6'],
     ['Mentors & Judges', 'Get support', 'chat:mentors', 'team', '#eb4d6b'],
-    ['Submit Project', 'Upload your solution', 'submit', 'upload', '#2f80ed'],
+    isOrganiser
+      ? ['Applications', pending ? `${pending} waiting for you` : 'Review sign-ups', 'applications', 'user', '#2f80ed']
+      : ['Submit Project', 'Upload your solution', 'submit', 'upload', '#2f80ed'],
   ];
   return (
     <div className="screen">
@@ -428,52 +436,548 @@ function Submit({ back, addSubmission, existing, frozen }) {
   );
 }
 
-function Login({ onLogin, emailLink }) {
-  const [f, setF] = useState({ name: '', team: '', role: 'Hackers', code: '', teamCode: '', email: '', phone: '', organisation: '', skills: '', motivation: '' });
+// An inline fill-in-the-blank input.
+// A hidden copy of the text in the same grid cell sets the width, so it fits exactly.
+const Blank = ({ value, placeholder, type, ...rest }) => (
+  <span className="blankWrap" data-value={(type === 'password' ? '•'.repeat(value.length) : value) || placeholder}>
+    <input data-blank className="blank" type={type} placeholder={placeholder} value={value} size={1} {...rest} />
+  </span>
+);
+
+// Signing up is a road trip along the Panorama Route: one question per stop,
+// and the photo behind you changes to that stop as you go.
+const ROUTE = [
+  { place: 'Graskop', img: 'graskop', fact: 'The gateway to the Panorama Route, and home of the famous pancakes.' },
+  { place: "Pilgrim's Rest", img: 'pilgrims', fact: 'A gold-rush town kept much as it was since gold was found here in 1873.' },
+  { place: 'Lisbon Falls', img: 'lisbon', fact: 'At 94 metres, the highest waterfall in Mpumalanga.' },
+  { place: "Bourke's Luck Potholes", img: 'bourkes', fact: 'Rock carved into deep cylinders by centuries of swirling water.' },
+  { place: "God's Window", img: 'godswindow', fact: 'On a clear day the view stretches across the Lowveld towards Kruger.' },
+  { place: 'Blyde River Canyon', img: 'blyde', fact: 'One of the largest green canyons on Earth. You made it.' },
+];
+// Full-screen photos: 1920px on computers, a lighter 1280px set on phones (see public/images/route).
+const routePhoto = (r) => `/images/route/${r.img}-${window.matchMedia('(min-width: 900px)').matches ? 1920 : 1280}.jpg`;
+// Hidden staff sign-in address. Not linked anywhere; access codes are still what keeps it safe.
+const STAFF_PATH = '/staff';
+const STAFF = window.location.pathname.replace(/\/+$/, '') === STAFF_PATH;
+const ROLES = [['Hackers', 'a hacker'], ['Mentor', 'a mentor'], ['Judge', 'a judge'], ['Organiser', 'an organiser']];
+const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+const ROAD = 'M 10 50 C 120 8, 210 84, 330 44 S 540 8, 660 46 S 860 82, 990 30';
+
+// Winding road along the bottom. The gold part is how far you have come; reached stops can be tapped to go back.
+function RouteMap({ stops, here, reached, go }) {
+  const ref = useRef(null);
+  const [pts, setPts] = useState(null);
+  useEffect(() => {
+    const p = ref.current;
+    const len = p.getTotalLength();
+    setPts(stops.map((_, i) => p.getPointAtLength((len * i) / (stops.length - 1))));
+  }, [stops.length]);
+  const doneX = pts ? pts[here].x : 0;
+  return (
+    <div className="routeMap">
+      <svg viewBox="0 0 1000 90" preserveAspectRatio="none" aria-hidden="true">
+        <defs><clipPath id="routeDone"><rect className="doneClip" width="1000" height="90" style={{ transform: `scaleX(${doneX / 1000})` }} /></clipPath></defs>
+        <path ref={ref} className="road" d={ROAD} />
+        <path className="done" d={ROAD} clipPath="url(#routeDone)" />
+      </svg>
+      {pts && stops.map((s, i) => (
+        <button key={s.place} type="button" disabled={i > reached} onClick={() => go(i)}
+          className={`pin ${i <= reached ? 'reached' : ''} ${i === here ? 'here' : ''}`}
+          style={{ left: `${pts[i].x / 10}%`, top: `${(pts[i].y / 90) * 100}%` }}
+          aria-label={`${s.place}${i === here ? ', you are here' : i > reached ? ', not reached yet' : ''}`}>
+          <i /><span>{s.place}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// The public landing page is the hacker application. Mentors, judges and organisers
+// sign in at the unlinked /staff address instead (see STAFF_PATH).
+function Login({ onLogin, emailLink, staff, initialMode = 'join', onHome }) {
+  const [f, setF] = useState({ name: '', team: '', role: staff ? 'Organiser' : 'Hackers', code: '', teamCode: '', email: '', phone: '', organisation: '', skills: '', motivation: '' });
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
   const hacker = f.role === 'Hackers';
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
-  const [mode, setMode] = useState('join');
+  const [stamped, setStamped] = useState(false);
+  const [mode, setMode] = useState(initialMode);
   const [email, setEmail] = useState('');
   const [sent, setSent] = useState(false);
+
+  // Staff only pass three stops: who you are, your access code, then the pass.
+  const stops = hacker ? ROUTE : [ROUTE[0], ROUTE[1], ROUTE[5]];
+  const last = stops.length - 1;
+  const valid = hacker
+    ? [f.name.trim(), f.team.trim() && f.teamCode.length >= 4, EMAIL_RE.test(f.email.trim()), f.organisation.trim(), f.motivation.trim(), true]
+    : [f.name.trim(), f.team.trim() && f.code, true];
+  const [step, setStep] = useState(0);
+  const [reachedRaw, setReached] = useState(0);
+  const reached = Math.min(reachedRaw, last);
+  const go = (i) => { setErr(''); setStamped(false); setStep(i); setReached((r) => Math.max(r, i)); };
+
+  // Put the cursor in the first blank of each new stop (not on first load, so phones don't pop the keyboard).
+  const stage = useRef(null);
+  const moved = useRef(false);
+  useEffect(() => {
+    if (!moved.current) { moved.current = true; return; }
+    stage.current?.querySelector('[data-blank]')?.focus({ preventScroll: true });
+  }, [step, mode]);
+
+  // Enter moves to the next blank; on the last blank of a stop it drives on to the next stop.
+  const onKeyDown = (e) => {
+    if (e.key !== 'Enter' || e.target.tagName === 'TEXTAREA' || !e.target.matches('[data-blank]')) return;
+    const blanks = [...stage.current.querySelectorAll('[data-blank]')];
+    const nextBlank = blanks[blanks.indexOf(e.target) + 1];
+    e.preventDefault();
+    if (nextBlank) nextBlank.focus(); else e.currentTarget.requestSubmit();
+  };
   const submit = async (e) => {
     e.preventDefault();
-    setBusy(true); setErr('');
-    try {
-      if (mode === 'email') { await emailLink(email); setSent(true); } else await onLogin(f);
-    } catch (x) { setErr(x.message || 'Could not sign in'); }
-    setBusy(false);
+    if (mode === 'email') {
+      setBusy(true); setErr('');
+      try { await emailLink(email); setSent(true); } catch (x) { setErr(x.message || 'Could not send the link'); }
+      setBusy(false); return;
+    }
+    if (step < last) { if (valid[step]) go(step + 1); return; }
+    setBusy(true); setErr(''); setStamped(true);
+    await new Promise((r) => setTimeout(r, 700));
+    try { await onLogin(f); } catch (x) { setStamped(false); setErr(x.message || 'Could not sign in'); setBusy(false); }
   };
+  const fixStep = /team code|access code/i.test(err) ? 1 : /email/i.test(err) ? 2 : null;
+
+  const stop = stops[step];
+  const roleLabel = ROLES.find(([v]) => v === f.role)[1];
+  const rows = hacker
+    ? [['Name', f.name, 0], ['Team', f.team, 1], ['Email', f.email, 2], ...(f.phone ? [['Phone', f.phone, 2]] : []),
+      ['From', f.organisation, 3], ...(f.skills ? [['Brings', f.skills, 3]] : []), ['Why', f.motivation, 4]]
+    : [['Joining as', roleLabel, 0], ['Team', f.team, 1]];
+
   return (
-    <div className="screen">
-      <Hero className="tall"><Logo /><h1 className="homeTitle">Welcome to the<br />Hackathon Hub</h1><p className="tag">Apply to take part, or sign in with your access code</p></Hero>
-      <form className="form pull" onSubmit={submit}>
-        <div className="card">
-          {mode === 'email' ? <>
-            <label>Email you saved to your account<input required type="email" placeholder="you@example.com" value={email} onChange={(e) => setEmail(e.target.value)} /></label>
-            {sent && <p className="empty" role="status">Check your inbox for the sign-in link.</p>}
-          </> : <>
-            <label>Your name<input required placeholder="e.g. Thabo Mokoena" value={f.name} onChange={set('name')} /></label>
-            <label>I am a<select value={f.role} onChange={set('role')}>{['Hackers', 'Mentor', 'Judge', 'Organiser'].map((t) => <option key={t}>{t}</option>)}</select></label>
-            <label>Team<input required placeholder="e.g. Team Alpha" value={f.team} onChange={set('team')} /></label>
-            {hacker ? <>
-              <label>Team code<input required type="password" minLength={4} placeholder="New team? Choose one. Joining? Ask a teammate." value={f.teamCode} onChange={set('teamCode')} /></label>
-              <label>Email<input required type="email" maxLength={200} placeholder="you@example.com" value={f.email} onChange={set('email')} /></label>
-              <label>Phone (optional)<input type="tel" maxLength={30} placeholder="e.g. 072 123 4567" value={f.phone} onChange={set('phone')} /></label>
-              <label>School, university or organisation<input required maxLength={200} placeholder="e.g. University of Mpumalanga" value={f.organisation} onChange={set('organisation')} /></label>
-              <label>Skills (optional)<input maxLength={500} placeholder="e.g. React, design, data, marketing" value={f.skills} onChange={set('skills')} /></label>
-              <label>Why do you want to take part?<textarea required rows={3} maxLength={1000} placeholder="A few lines about you and what you'd like to build" value={f.motivation} onChange={set('motivation')} /></label>
-            </> : <label>Access code<input required type="password" placeholder="Given to you by the organisers" value={f.code} onChange={set('code')} /></label>}
-          </>}
-          {err && <p className="empty" role="alert">{err}</p>}
-          <small className="finePrint">{hacker && mode === 'join' ? 'Organisers review every application and can see your email and phone number. ' : ''}By joining you agree that your name, team and messages are shared with other participants. See Settings &gt; Privacy after signing in.</small>
-          <button className="btn" disabled={busy}>{busy ? 'Please wait…' : mode === 'email' ? 'Email me a sign-in link' : hacker ? 'Apply to join' : 'Join the Hackathon'}</button>
-          <button type="button" className="linkBtn" onClick={() => { setMode(mode === 'join' ? 'email' : 'join'); setErr(''); setSent(false); }}>
-            {mode === 'join' ? 'Already saved your account? Sign in with email' : 'Back to join'}
-          </button>
+    <form className="route" onSubmit={submit} onKeyDown={onKeyDown} noValidate={mode === 'join' && step === last}>
+      <div className="routeBg" aria-hidden="true">
+        {ROUTE.map((r) => {
+          const active = r === (mode === 'email' ? ROUTE[5] : stop);
+          // Only fetch the photos you can see or are about to drive to.
+          const load = active || stops.indexOf(r) <= reached + 1 && stops.includes(r);
+          return <div key={r.img} className={active ? 'on' : ''} style={load ? { backgroundImage: `url(${routePhoto(r)})` } : undefined} />;
+        })}
+      </div>
+
+      <div className="routeTop">
+        {onHome ? <button type="button" className="routeHome" onClick={onHome} aria-label="Back to the website"><Icon d={I.arrowLeft} size={18} /><Logo small /></button> : <Logo small />}
+        <button type="button" className="routeSwitch" onClick={() => { setMode(mode === 'join' ? 'email' : 'join'); setErr(''); setSent(false); }}>
+          <Icon d={mode === 'join' ? I.key : I.arrowLeft} size={16} />
+          <span>{mode === 'join' ? <><span className="wideOnly">Saved your account? </span><b>Sign in</b></> : 'Back to sign-up'}</span>
+        </button>
+      </div>
+
+      <div className="routeMain">
+        {mode === 'email' ? (
+          <div className="routeStage" ref={stage} key="email">
+            <span className="stopTag">Welcome back</span>
+            <p className="big">Send a sign-in link to <Blank required type="email" aria-label="Email you saved to your account" placeholder="your saved email" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="email" />.</p>
+            {sent && <p className="routeHint" role="status">Done. Check your inbox for the sign-in link.</p>}
+            {err && <p className="routeErr" role="alert">{err}</p>}
+            <div className="routeNav">
+              <button className="goBtn" disabled={busy || !EMAIL_RE.test(email.trim())}>
+                <span className="goText"><small>Welcome back</small><b>{busy ? 'Sending…' : 'Email me a link'}</b></span>
+                <span className="goIcon" aria-hidden="true"><Icon d={I.mail} size={20} /></span>
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="routeStage" ref={stage} key={step}>
+            <span className="stopTag">{staff ? 'Staff entrance · ' : ''}Stop {step + 1} of {stops.length}</span>
+            <p className="stopPlace">{stop.place}</p>
+            <p className="stopFact">{stop.fact}</p>
+
+            {step === 0 && (staff ? (
+              <p className="big">
+                Sawubona! My name is <Blank required maxLength={80} aria-label="Your name" placeholder="your name" value={f.name} onChange={set('name')} autoComplete="name" />
+                {' '}and I'm here as{' '}
+                <span className="blankWrap" data-value={`${roleLabel} ▾`}>
+                  <select data-blank className="blank" aria-label="Your role" value={f.role} onChange={set('role')}>
+                    {ROLES.filter(([v]) => v !== 'Hackers').map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                  </select>
+                </span>.
+              </p>
+            ) : (
+              <p className="big">
+                Sawubona! My name is <Blank required maxLength={80} aria-label="Your name" placeholder="your name" value={f.name} onChange={set('name')} autoComplete="name" />,
+                and I want a seat at the hackathon.
+              </p>
+            ))}
+            {step === 1 && (hacker ? <>
+              <p className="big">
+                My crew is called <Blank required maxLength={60} aria-label="Team name" placeholder="team name" value={f.team} onChange={set('team')} />,
+                and our secret password is <Blank required type="password" minLength={4} aria-label="Team code, at least 4 characters" placeholder="4+ characters" value={f.teamCode} onChange={set('teamCode')} />.
+              </p>
+              <p className="routeHint">New team? Make one up and share it with your crew. Joining one? Ask a teammate for it.</p>
+            </> : (
+              <p className="big">
+                I'm with <Blank required maxLength={60} aria-label="Team or group" placeholder="your group" value={f.team} onChange={set('team')} />,
+                and my access code is <Blank required type="password" aria-label="Access code" placeholder="from the organisers" value={f.code} onChange={set('code')} />.
+              </p>
+            ))}
+            {hacker && step === 2 && (
+              <p className="big">
+                Drop me a line at <Blank required type="email" maxLength={200} aria-label="Email" placeholder="your email" value={f.email} onChange={set('email')} autoComplete="email" />
+                {' '}or call me on <Blank type="tel" maxLength={30} aria-label="Phone (optional)" placeholder="phone (optional)" value={f.phone} onChange={set('phone')} autoComplete="tel" />.
+              </p>
+            )}
+            {hacker && step === 3 && (
+              <p className="big">
+                I'm from <Blank required maxLength={200} aria-label="School, university or organisation" placeholder="school or organisation" value={f.organisation} onChange={set('organisation')} />,
+                and I bring <Blank maxLength={500} aria-label="Skills (optional)" placeholder="skills (optional)" value={f.skills} onChange={set('skills')} /> to the table.
+              </p>
+            )}
+            {hacker && step === 4 && <>
+              <p className="big lead">From up here, this is why I want in:</p>
+              <div className="postcard">
+                <small>Postcard to the organisers</small>
+                <textarea data-blank required rows={5} maxLength={1000} aria-label="Why do you want to take part?" placeholder="Dear organisers…" value={f.motivation} onChange={set('motivation')} />
+              </div>
+            </>}
+            {step === last && <>
+              <p className="big lead">{hacker ? 'Your Panorama Pass is ready.' : 'Welcome aboard.'}</p>
+              <div className={`pass ${stamped ? 'stamped' : ''}`}>
+                <div className="passHead">
+                  <div><small>Panorama Pass · Hackathon 2026</small><br /><b>{f.name}</b></div>
+                  <small>Admit one</small>
+                </div>
+                <div className="passRows">
+                  {rows.map(([label, value, at]) => (
+                    <div key={label} className="passRow">
+                      <small>{label}</small>
+                      <span className={label === 'Why' ? 'quote' : ''}>{label === 'Why' ? `“${value}”` : value}</span>
+                      <button type="button" onClick={() => go(at)} aria-label={`Edit ${label}`}>Edit</button>
+                    </div>
+                  ))}
+                </div>
+                <div className="stamp" aria-hidden="true">{hacker ? <>APPLIED<br />✓</> : <>ADMIT<br />✓</>}</div>
+              </div>
+            </>}
+
+            {err && <p className="routeErr" role="alert">{err}{fixStep != null && fixStep <= last && <> · <button type="button" className="linkInline" onClick={() => go(fixStep)}>Fix it</button></>}</p>}
+            <div className="routeNav">
+              {step > 0 && <button type="button" className="backBtn" onClick={() => go(step - 1)} aria-label={`Back to ${stops[step - 1].place}`}><Icon d={I.arrowLeft} size={22} /></button>}
+              <button className={`goBtn ${step === last ? 'final' : ''}`} disabled={busy || !valid[step]}>
+                <span className="goText">
+                  {busy ? <b>Sending…</b>
+                    : step < last ? <><small>Next stop</small><b>{stops[step + 1].place}</b></>
+                      : <><small>{hacker ? 'Last step' : 'All set'}</small><b>{hacker ? 'Stamp it & send' : 'Let me in'}</b></>}
+                </span>
+                <span className="goIcon" aria-hidden="true"><Icon d={step === last ? I.stamp : I.arrowRight} size={20} /></span>
+              </button>
+              {step < last && <span className="routeKey">or press <kbd>Enter ↵</kbd></span>}
+            </div>
+            {(step === 0 || step === last) && (
+              <p className="routeFine">{hacker ? 'Organisers review every application and can see your email and phone number. ' : ''}Your name, team and messages are shared with other participants. See Settings &gt; Privacy after signing in.</p>
+            )}
+          </div>
+        )}
+      </div>
+
+      {mode === 'join' && <RouteMap stops={stops} here={step} reached={reached} go={go} />}
+    </form>
+  );
+}
+
+// Public website shown to signed-out visitors. "Apply now" opens the application (#apply);
+// once an organiser accepts someone, the same address opens the Hub app for them.
+const HOW = [
+  ['Apply', 'Tell us who you are and what you want to build. It takes about two minutes.'],
+  ['Get accepted', 'The organisers review every application. Come back here to see their decision.'],
+  ['Open the Hub', 'Once you are in, this site becomes your event app: team chat, announcements, the programme and the countdown.'],
+  ['Build & pitch', 'Pick a challenge, build with your team and submit before code freeze. Judges score impact, innovation, tech and pitch.'],
+];
+const HUB = [
+  ['chat', 'Team chat', 'Your own team channel, plus general chat and a line to the mentors.'],
+  ['mega', 'Announcements', 'Official updates from the organisers, the moment they post them.'],
+  ['clock', 'Code-freeze countdown', 'One clock for every team, with a reminder before time runs out.'],
+  ['cal', 'Programme', 'Every session, meal and deadline, day by day.'],
+  ['upload', 'Submissions', 'Send your demo, repo and slides, and update them until code freeze.'],
+  ['trophy', 'Judging', 'Judges score every project in the app, so results are ready on time.'],
+];
+const SITE_FAQS = [
+  ['How do I get in?', 'Apply on this site. The organisers review every application, and once you are accepted this site opens the Hackathon Hub app for you.'],
+  ['Do I need a team to apply?', 'No. Enter a new team name and make up a team code, or join friends by using their team name and code.'],
+  ...faqs.filter(([q]) => q !== 'Who can take part?'),
+];
+
+// Hero headline: "Code the <stop>", with a caption for each stop.
+const HERO_STOPS = [
+  ['Panorama Route.', 'The R532, from Graskop past the waterfalls to the Blyde River Canyon.'],
+  ['Big Five.', 'All five are out on the plain below. Look closely.'],
+  ['Blyde River Canyon.', 'One of the largest green canyons on Earth.'],
+  ["God's Window.", 'A sheer drop from the escarpment to the Lowveld, when the mist allows.'],
+  ['road ahead.', 'Four challenges from the people who run tourism here.'],
+];
+
+const prefersReducedMotion = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+// Adds .in to [data-reveal] elements the first time they scroll into view.
+function useReveal(root) {
+  useEffect(() => {
+    const io = new IntersectionObserver((entries) => entries.forEach((e) => {
+      if (e.isIntersecting) { e.target.classList.add('in'); io.unobserve(e.target); }
+    }), { threshold: 0.15 });
+    root.current.querySelectorAll('[data-reveal]').forEach((el) => io.observe(el));
+    return () => io.disconnect();
+  }, [root]);
+}
+
+// Counts up from 0 the first time it scrolls into view.
+function CountUp({ to }) {
+  const ref = useRef(null);
+  const [n, setN] = useState(to);
+  useEffect(() => {
+    if (prefersReducedMotion()) return undefined;
+    setN(0);
+    let raf = 0;
+    const io = new IntersectionObserver(([e]) => {
+      if (!e.isIntersecting) return;
+      io.disconnect();
+      const start = performance.now();
+      const tick = (now) => {
+        const k = Math.min(1, (now - start) / 1300);
+        setN(Math.round(to * (1 - (1 - k) ** 3)));
+        if (k < 1) raf = requestAnimationFrame(tick);
+      };
+      raf = requestAnimationFrame(tick);
+    });
+    io.observe(ref.current);
+    return () => { io.disconnect(); cancelAnimationFrame(raf); };
+  }, [to]);
+  return <b ref={ref}>{n}</b>;
+}
+
+// Challenge cards lean towards the pointer, with a soft highlight where it is.
+const tilt = (e) => {
+  const el = e.currentTarget, r = el.getBoundingClientRect();
+  const x = (e.clientX - r.left) / r.width, y = (e.clientY - r.top) / r.height;
+  el.style.setProperty('--rx', `${(0.5 - y) * 9}deg`); el.style.setProperty('--ry', `${(x - 0.5) * 11}deg`);
+  el.style.setProperty('--mx', `${x * 100}%`); el.style.setProperty('--my', `${y * 100}%`);
+};
+const untilt = (e) => { e.currentTarget.style.setProperty('--rx', '0deg'); e.currentTarget.style.setProperty('--ry', '0deg'); };
+
+// The low-poly 3D Mpumalanga behind the hero (dusk) and the closing section (night).
+function WorldCanvas({ night = false }) {
+  const ref = useRef(null);
+  const [ready, setReady] = useState(false);
+  useEffect(() => {
+    let stop = () => {}, alive = true;
+    startWorld(ref.current, { night, reduced: prefersReducedMotion() })
+      .then((s) => { if (alive) { stop = s; setReady(true); } else s(); })
+      .catch(() => {}); // no WebGL: the painted gradient behind the canvas stays
+    return () => { alive = false; stop(); };
+  }, [night]);
+  return <canvas ref={ref} className={`world${ready ? ' ready' : ''}`} aria-hidden="true" />;
+}
+
+// A small live copy of the app's home screen for the "Hub" section.
+function PhoneMock() {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => { const t = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(t); }, []);
+  const left = Math.floor((86400000 - (now % 86400000)) / 1000); // ticks down to midnight, just for show
+  const tiles = [['chat', '#22b573', 'Team Chat'], ['mega', '#f5a623', 'Updates'], ['bulb', '#7c5cff', 'Challenges'], ['cal', '#17b8a6', 'Programme'], ['team', '#eb4d6b', 'Mentors'], ['upload', '#2f80ed', 'Submit']];
+  return (
+    <div className="phoneMock" aria-hidden="true">
+      <div className="pmScreen">
+        <div className="pmHero"><Logo small /><b>Tourism Mpumalanga<br />Hackathon Hub</b></div>
+        <div className="pmTimer">
+          <small>Time remaining until code freeze</small>
+          <div>{[Math.floor(left / 3600), Math.floor((left % 3600) / 60), left % 60].map((v, i) => <span key={i}>{pad(v)}</span>)}</div>
         </div>
-      </form>
+        <div className="pmTiles">{tiles.map(([ic, c, l]) => <span key={l}><i style={{ background: `${c}22`, color: c }}><Icon d={I[ic]} size={15} /></i>{l}</span>)}</div>
+        <div className="pmNav"><i /><i /><i /><i /></div>
+      </div>
+    </div>
+  );
+}
+
+function Landing({ apply, signIn }) {
+  const root = useRef(null);
+  const nav = useRef(null);
+  const [scrolled, setScrolled] = useState(false);
+  const [stop, setStop] = useState(0);
+  useReveal(root);
+  // The headline's last word cycles through stops on the route; the corner caption narrates each one.
+  useEffect(() => {
+    if (prefersReducedMotion()) return undefined;
+    const t = setInterval(() => setStop((n) => (n + 1) % HERO_STOPS.length), 3400);
+    return () => clearInterval(t);
+  }, []);
+  useEffect(() => {
+    const on = () => {
+      setScrolled(window.scrollY > 40);
+      const max = document.documentElement.scrollHeight - window.innerHeight;
+      nav.current?.style.setProperty('--p', max > 0 ? String(window.scrollY / max) : '0');
+    };
+    on();
+    window.addEventListener('scroll', on, { passive: true });
+    return () => window.removeEventListener('scroll', on);
+  }, []);
+  const ApplyBtn = ({ label = 'Applications open' }) => (
+    <button type="button" className="goBtn" onClick={apply}>
+      <span className="goText"><small>{label}</small><b>Apply now</b></span>
+      <span className="goIcon" aria-hidden="true"><Icon d={I.arrowRight} size={20} /></span>
+    </button>
+  );
+  return (
+    <div className="site" ref={root}>
+      <header ref={nav} className={`siteNav ${scrolled ? 'solid' : ''}`}>
+        <a href="#top" aria-label={`${event.name}, back to top`}><Logo small /></a>
+        <nav className="siteLinks" aria-label="Sections">
+          <a href="#about">How it works</a><a href="#challenges">Challenges</a><a href="#programme">Programme</a><a href="#faq">FAQ</a>
+        </nav>
+        <div className="siteActions">
+          <button type="button" className="siteGhost" onClick={signIn}>Sign in</button>
+          <button type="button" className="sitePill" onClick={apply}>Apply now</button>
+        </div>
+        <i className="siteProgress" aria-hidden="true" />
+      </header>
+
+      <main>
+        <section className="siteHero" id="top">
+          <WorldCanvas />
+          <div className="heroShade" aria-hidden="true" />
+          <div className="siteHeroInner">
+            <p className="heroMeta">
+              <span className="routeShield" title="The R532, the Panorama Route">R532</span>
+              <span>{event.dates}</span><i /><span>{event.place}</span><i /><span className="coords">24°52′S 30°53′E</span>
+            </p>
+            <h1 aria-label="Code the Panorama Route.">
+              <span className="w" style={{ '--d': 0 }}>Code</span> <span className="w" style={{ '--d': 1 }}>the</span><br />
+              <em className="w" style={{ '--d': 2 }}>
+                <span className="rotator" aria-hidden="true">
+                  {HERO_STOPS.map(([word], k) => <span key={word} className={k === stop ? 'on' : k === (stop + HERO_STOPS.length - 1) % HERO_STOPS.length ? 'off' : ''}>{word}</span>)}
+                </span>
+              </em>
+              <svg className="routeLine" key={stop} viewBox="0 0 400 12" preserveAspectRatio="none" aria-hidden="true"><path d="M2 8 C 90 2, 180 11, 270 5 S 370 4, 398 7" /></svg>
+            </h1>
+            <p className="siteLead">
+              <b>{days.length * 24} hours.</b> <b>{challenges.length} real briefs</b> from the people who run tourism here. One question: what would make a trip along this road easier to plan, safer to drive and open to everyone? Come build the answer.
+            </p>
+            <div className="siteCtas">
+              <ApplyBtn />
+              <a className="siteGhost big" href="#challenges">See the challenges</a>
+            </div>
+          </div>
+          <p className="sceneNote" aria-live="off">
+            <span className="noteKey" key={stop}><small>{String(stop + 1).padStart(2, '0')} / {String(HERO_STOPS.length).padStart(2, '0')}</small>{HERO_STOPS[stop][1]}</span>
+          </p>
+        </section>
+
+        <div className="marquee" aria-hidden="true">
+          <div>{[0, 1].map((k) => <span key={k}>Innovate <i>·</i> Collaborate <i>·</i> Transform tourism <i>·</i> Sawubona <i>·</i> Code the Panorama Route <i>·</i>&nbsp;</span>)}</div>
+        </div>
+
+        <section className="paperBg">
+          <div className="siteSection" id="about">
+            <div className="aboutGrid">
+              <div>
+                <p className="siteEyebrow" data-reveal>How it works</p>
+                <h2 data-reveal>From application to awards in four stops.</h2>
+              </div>
+              <dl className="statsRow">
+                <div data-reveal><dt>Days of building</dt><dd><CountUp to={days.length} /></dd></div>
+                <div data-reveal style={{ '--delay': '.08s' }}><dt>Tourism challenges</dt><dd><CountUp to={challenges.length} /></dd></div>
+                <div data-reveal style={{ '--delay': '.16s' }}><dt>App for the whole event</dt><dd><b>1</b></dd></div>
+              </dl>
+            </div>
+            <ol className="siteSteps">
+              {HOW.map(([title, body], i) => (
+                <li key={title} data-reveal style={{ '--delay': `${i * 0.12}s` }}><span>{String(i + 1).padStart(2, '0')}</span><b>{title}</b><p>{body}</p></li>
+              ))}
+            </ol>
+          </div>
+        </section>
+
+        <section className="forestBg">
+          <div className="siteSection" id="challenges">
+            <p className="siteEyebrow" data-reveal>The challenges</p>
+            <h2 data-reveal>Real problems from the tourism industry.</h2>
+            <div className="siteCards">
+              {challenges.map((c, i) => (
+                <article key={c.id} className="siteCard" data-reveal style={{ backgroundImage: `url(${c.img})`, '--delay': `${i * 0.1}s` }} onMouseMove={tilt} onMouseLeave={untilt}>
+                  <div>
+                    <span>Challenge {String(c.id).padStart(2, '0')}</span>
+                    <h3>{c.title}</h3>
+                    <p>{c.body}</p>
+                  </div>
+                </article>
+              ))}
+            </div>
+          </div>
+        </section>
+
+        <section className="boneBg">
+          <div className="siteSection" id="programme">
+            <p className="siteEyebrow" data-reveal>Programme</p>
+            <h2 data-reveal>{days.length} days on the hack floor.</h2>
+            <div className="siteDays">
+              {days.map(([d, w], i) => (
+                <div key={d} className="siteDay" data-reveal style={{ '--delay': `${i * 0.12}s` }}>
+                  <small>Day {i + 1}</small>
+                  <h3>{w}, {d}</h3>
+                  <ul>
+                    {(programme[d] || []).map(([time, title, where]) => (
+                      <li key={time + title}><b>{time}</b><span>{title}<small>{where}</small></span></li>
+                    ))}
+                  </ul>
+                </div>
+              ))}
+            </div>
+          </div>
+        </section>
+
+        <section className="siteHub">
+          <div className="siteSection hubGrid">
+            <div>
+              <p className="siteEyebrow" data-reveal>Once you're in</p>
+              <h2 data-reveal>Everything happens in the Hub.</h2>
+              <div className="siteFeatures">
+                {HUB.map(([ic, title, body], i) => (
+                  <div key={title} data-reveal style={{ '--delay': `${i * 0.07}s` }}><span><Icon d={I[ic]} size={20} /></span><b>{title}</b><p>{body}</p></div>
+                ))}
+              </div>
+            </div>
+            <div data-reveal className="mockWrap"><PhoneMock /></div>
+          </div>
+        </section>
+
+        <section className="paperBg">
+          <div className="siteSection narrow" id="faq">
+            <p className="siteEyebrow" data-reveal>FAQ</p>
+            <h2 data-reveal>Good to know.</h2>
+            {SITE_FAQS.map(([q, a], i) => (
+              <details key={q} className="siteFaq" data-reveal open={i === 0}><summary>{q}</summary><p>{a}</p></details>
+            ))}
+          </div>
+        </section>
+
+        <section className="siteNight">
+          <WorldCanvas night />
+          <div className="nightShade" aria-hidden="true" />
+          <div className="nightInner" data-reveal>
+            <p className="siteEyebrow">Applications are open</p>
+            <h2>Your seat on the Panorama Route is <em>waiting.</em></h2>
+            <ApplyBtn label="Takes two minutes" />
+          </div>
+        </section>
+      </main>
+
+      <footer className="siteFoot">
+        <div><Logo small /><p>{event.name} · {event.dates}</p></div>
+        <details>
+          <summary>Photo credits</summary>
+          {credits.map((c) => (
+            <p key={c.file}><a href={c.url} target="_blank" rel="noreferrer">{c.title.replace(/\.jpg$/, '')}</a> by {c.author}, {c.license}, via Wikimedia Commons</p>
+          ))}
+        </details>
+      </footer>
     </div>
   );
 }
@@ -493,7 +997,7 @@ function ApplicationStatus({ user, refresh }) {
     if (error) alert(error.message); else { await supabase.auth.signOut(); localStorage.clear(); location.reload(); }
   };
   return (
-    <div className="screen">
+    <div className="screen auth">
       <Hero className="tall"><Logo /><h1 className="homeTitle">{rejected ? 'Application not accepted' : 'Application received'}</h1><p className="tag">{rejected ? 'Thank you for your interest' : 'Waiting for the organisers'}</p></Hero>
       <div className="form pull">
         <div className="card">
@@ -545,8 +1049,8 @@ function Applications({ back, profiles, apps, review }) {
               <p>{a.motivation}</p>
               {a.note && <p><small>Note: </small>{a.note}</p>}
               <small>Applied {new Date(a.created_at).toLocaleString()}</small>
-              <div>
-                {p.status !== 'approved' && <button className="btn small" onClick={() => decide(p, 'approved')}>Approve</button>}{' '}
+              <div className="reviewBtns">
+                {p.status !== 'approved' && <button className="btn small" onClick={() => decide(p, 'approved')}>Approve</button>}
                 {p.status !== 'rejected' && <button className="btn small danger" onClick={() => decide(p, 'rejected')}>Reject</button>}
               </div>
             </div>
@@ -794,17 +1298,36 @@ export default function App() {
   return <Authed />;
 }
 
+function useHash() {
+  const [hash, setHash] = useState(window.location.hash);
+  useEffect(() => {
+    const on = () => setHash(window.location.hash);
+    window.addEventListener('hashchange', on);
+    return () => window.removeEventListener('hashchange', on);
+  }, []);
+  return hash;
+}
+
 function Authed() {
   const { ready, profile, join, logout, emailLink, refresh } = useAuth();
+  const hash = useHash();
+  const goTo = (h) => { window.location.hash = h; window.scrollTo(0, 0); };
   const frame = (child) => <div className="phoneWrap"><div className="phone"><div className="status"><span>9:41</span><span>●●● ▮</span></div><div className="body">{child}</div></div></div>;
   if (!ready) return frame(<p className="empty">Loading…</p>);
-  if (!profile) return frame(<Login onLogin={join} emailLink={emailLink} />);
+  if (!profile) {
+    if (STAFF) return frame(<Login onLogin={join} emailLink={emailLink} staff />);
+    if (hash === '#apply' || hash === '#signin') {
+      return frame(<Login key={hash} onLogin={join} emailLink={emailLink} initialMode={hash === '#signin' ? 'email' : 'join'} onHome={() => goTo('top')} />);
+    }
+    return <Landing apply={() => goTo('apply')} signIn={() => goTo('signin')} />;
+  }
   if (profile.status !== 'approved') return frame(<ApplicationStatus user={profile} refresh={refresh} />);
   return <Main user={profile} logout={logout} />;
 }
 
 function Main({ user, logout }) {
-  const [stack, setStack] = useState(['home']);
+  // Organisers who come in through the staff entrance start on the applications list.
+  const [stack, setStack] = useState(() => (STAFF && user.role === 'Organiser' ? ['home', 'applications'] : ['home']));
   const screen = stack[stack.length - 1];
   const [chatId, setChatId] = useState(null);
   const [annSeen, setAnnSeen] = useStored('annSeen', 0);
@@ -946,7 +1469,7 @@ function Main({ user, logout }) {
           {!online && <div className="freezeBanner offline" role="status">You're offline — messages and changes won't be saved until you reconnect</div>}
           {soon && <div className="freezeBanner" role="alert">⏰ Code freeze in {t.m}:{t.s} — submit your final solution now</div>}
           {frozen && <div className="freezeBanner done" role="alert">Code freeze — submissions are closed</div>}
-          {screen === 'home' && <Home go={go} deadline={deadline} unread={unreadTotal} />}
+          {screen === 'home' && <Home go={go} deadline={deadline} unread={unreadTotal} isOrganiser={isOrganiser} pending={pendingCount} />}
           {screen === 'chat' && <ChatList key={chatTab} unreadBy={unreadBy} initialTab={chatTab} openChat={openChat} back={() => go('home')} messages={messages} user={user} />}
           {screen === 'room' && <ChatRoom id={chatId} back={back} messages={messages} send={send} delMsg={delMsg} pending={outbox.filter((o) => o.channel === chatId)} user={user} />}
           {screen === 'alerts' && <Announcements back={() => go('home')} anns={anns} postAnn={postAnn} delAnn={delAnn} isOrganiser={isOrganiser} />}

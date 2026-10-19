@@ -12,6 +12,13 @@ export function getChats(user) {
   return [...channels.slice(0, 1), ...teamChat, ...channels.slice(1)];
 }
 
+// NOTE: sample content - replace with the real event details. Shown on the public website.
+export const event = {
+  name: 'Mpumalanga Tourism Hackathon',
+  dates: '16–18 October',
+  place: 'Mpumalanga, South Africa',
+};
+
 // Challenge briefs from the event design.
 export const challenges = [
   { id: 1, title: 'Smart Tourism Discovery', body: 'Build an AI-powered platform that recommends attractions, activities and itineraries based on visitor interests, budgets and location.', img: '/images/c1.jpg' },
